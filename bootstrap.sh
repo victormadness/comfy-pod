@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PV="/workspace"                # постоянный диск RunPod
-CUI="${PV}/ComfyUI"            # здесь живёт ВСЁ (код, models, custom_nodes, user)
+PV="/workspace"
+CUI="${PV}/ComfyUI"
 VENV="${PV}/venv"
 
-# --- КЭШИ: PV (по умолчанию) или /tmp (эпhemeral) ---
-CACHE_MODE="${CACHE_MODE:-pv}"   # pv | tmp  (можно задать в Env шаблона)
+# --- CACHE: PV (default) or /tmp (ephemeral) ---
+CACHE_MODE="${CACHE_MODE:-pv}"   # pv | tmp
 if [ "$CACHE_MODE" = "tmp" ]; then base="/tmp/.cache"; else base="${PV}/.cache"; fi
 export PIP_CACHE_DIR="${PIP_CACHE_DIR:-$base/pip}"
 export HF_HOME="${HF_HOME:-$base/huggingface}"
@@ -15,27 +15,43 @@ export TORCHINDUCTOR_CACHE_DIR="${TORCHINDUCTOR_CACHE_DIR:-$base/torchinductor}"
 export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-$base/triton}"
 mkdir -p "$PIP_CACHE_DIR" "$HF_HOME" "$TORCH_HOME" "$TORCHINDUCTOR_CACHE_DIR" "$TRITON_CACHE_DIR"
 
-# --- Структура на PV ---
+# --- Ensure base structure ---
 mkdir -p "${CUI}/models" "${CUI}/custom_nodes" "${CUI}/user" \
          "${PV}/inputs" "${PV}/outputs" "${PV}/temp"
 
-# --- Код ComfyUI на PV (аккуратно «дольём», не трогая models/custom_nodes/user) ---
-if [ ! -f "${CUI}/main.py" ]; then
-  echo "[setup] Installing ComfyUI code into ${CUI}"
+# --- Install/repair ComfyUI code on PV ---
+NEED_REPAIR=0
+[ ! -f "${CUI}/main.py" ] && NEED_REPAIR=1
+[ ! -d "${CUI}/comfy/ldm/models" ] && NEED_REPAIR=1
+if [ "${FORCE_REPAIR:-0}" = "1" ]; then NEED_REPAIR=1; fi
+
+if [ $NEED_REPAIR -eq 1 ]; then
+  echo "[setup] (re)installing ComfyUI code into ${CUI}"
   tmp="${PV}/.comfy_src.$$"
   git clone https://github.com/comfyanonymous/ComfyUI.git "${tmp}"
-  if command -v rsync >/dev/null 2>&1; then
-    rsync -a --delete --exclude 'models' --exclude 'custom_nodes' --exclude 'user' "${tmp}/" "${CUI}/"
-  else
-    (cd "${tmp}" && tar c --exclude=models --exclude=custom_nodes --exclude=user .) | (cd "${CUI}" && tar x)
-  fi
-  [ -d "${CUI}/.git" ] || mv "${tmp}/.git" "${CUI}/.git" || true
-  rm -rf "${tmp}"
+
+  # preserve your data
+  keep="${PV}/.keep.$$"; mkdir -p "${keep}"
+  mv "${CUI}/models"        "${keep}/models"        2>/dev/null || true
+  mv "${CUI}/custom_nodes"  "${keep}/custom_nodes"  2>/dev/null || true
+  mv "${CUI}/user"          "${keep}/user"          2>/dev/null || true
+
+  rm -rf "${CUI}"
+  mkdir -p "${CUI}"
+
+  # copy whole repo (no excludes to avoid breaking comfy/ldm/models)
+  rsync -a "${tmp}/" "${CUI}/" || (cd "${tmp}" && tar cf - .) | (cd "${CUI}" && tar xf -)
+
+  # restore your data
+  mv "${keep}/models"        "${CUI}/models"        2>/dev/null || true
+  mv "${keep}/custom_nodes"  "${CUI}/custom_nodes"  2>/dev/null || true
+  mv "${keep}/user"          "${CUI}/user"          2>/dev/null || true
+  rm -rf "${keep}" "${tmp}"
 else
-  echo "[setup] ComfyUI code already present at ${CUI}"
+  echo "[setup] ComfyUI code OK at ${CUI}"
 fi
 
-# --- venv на PV ---
+# --- venv on PV ---
 if [ ! -d "${VENV}" ]; then
   echo "[setup] Creating venv at ${VENV}"
   python3 -m venv --system-site-packages "${VENV}"
@@ -44,43 +60,24 @@ fi
 source "${VENV}/bin/activate"
 python -m pip install --upgrade pip
 
-# --- УСТАНОВКА ЗАВИСИМОСТЕЙ: только один раз ---
+# --- One-time deps ---
 DEPS_SENTINEL="${PV}/.deps_ok"
 if [ ! -f "$DEPS_SENTINEL" ]; then
   echo "[setup] Installing runtime deps (first run)"
-
-  # PyTorch 2.8 (CUDA 12.x cu124)
+  # PyTorch 2.8 (CUDA 12.x wheels)
   pip install --extra-index-url https://download.pytorch.org/whl/cu124 \
     torch==2.8.0 torchaudio==2.8.0 || true
   pip install --extra-index-url https://download.pytorch.org/whl/cu124 \
     'torchvision==0.23.*' || pip install --extra-index-url https://download.pytorch.org/whl/cu124 torchvision || true
 
-  # Wan/SageAttention и видео-стек
+  # SageAttention + video stack
   pip install -q \
     sageattention einops accelerate safetensors transformers \
     opencv-python av decord imageio[ffmpeg] moviepy tqdm requests httpx || true
 
-  # зависимости ядра и кастом-нод (если есть requirements.txt)
+  # Repo & custom node requirements (if present)
   [ -f "${CUI}/requirements.txt" ] && pip install -r "${CUI}/requirements.txt" || true
   if [ -d "${CUI}/custom_nodes" ]; then
     find "${CUI}/custom_nodes" -maxdepth 2 -type f -name requirements.txt -print0 \
     | while IFS= read -r -d '' req; do
-        echo "[bootstrap] pip install -r ${req}"
-        pip install -r "${req}" || true
-      done
-  fi
-
-  touch "$DEPS_SENTINEL"
-else
-  echo "[setup] Runtime deps already installed (skipping)"
-fi
-
-# --- старт ComfyUI ---
-cd "${CUI}"
-exec python main.py \
-  --listen 0.0.0.0 --port "${PORT:-8188}" \
-  --user-directory "${CUI}/user" \
-  --input-directory  "${PV}/inputs" \
-  --output-directory "${PV}/outputs" \
-  --temp-directory   "${PV}/temp" \
-  --preview-method auto
+        echo "[b]()
