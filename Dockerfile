@@ -16,5 +16,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Точка входа
 WORKDIR /runner
 COPY bootstrap.sh /runner/bootstrap.sh
-RUN chmod +x /runner/bootstrap.sh
+# НОРМАЛИЗУЕМ ПЕРЕНОСЫ И ДАЁМ ПРАВА
+RUN sed -i 's/\r$//' /runner/bootstrap.sh && chmod +x /runner/bootstrap.sh
 ENTRYPOINT ["/runner/bootstrap.sh"]
