@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
+
+# Логирование причины падения (если вдруг)
+trap 'code=$?; echo "[FATAL] line ${LINENO}: ${BASH_COMMAND} (exit $code)"; exit $code' ERR
 
 PV="/workspace"
 CUI="${PV}/ComfyUI"
@@ -20,32 +23,35 @@ mkdir -p "${CUI}/models" "${CUI}/custom_nodes" "${CUI}/user" \
          "${PV}/inputs" "${PV}/outputs" "${PV}/temp"
 
 # --- Install/repair ComfyUI code on PV ---
-NEED_REPAIR=0
-[ ! -f "${CUI}/main.py" ] && NEED_REPAIR=1
-[ ! -d "${CUI}/comfy/ldm/models" ] && NEED_REPAIR=1
-if [ "${FORCE_REPAIR:-0}" = "1" ]; then NEED_REPAIR=1; fi
+need_repair=0
+[ ! -f "${CUI}/main.py" ] && need_repair=1
+[ ! -d "${CUI}/comfy/ldm/models" ] && need_repair=1
+if [ "${FORCE_REPAIR:-0}" = "1" ]; then need_repair=1; fi
 
-if [ $NEED_REPAIR -eq 1 ]; then
+if [ "$need_repair" -eq 1 ]; then
   echo "[setup] (re)installing ComfyUI code into ${CUI}"
   tmp="${PV}/.comfy_src.$$"
-  git clone https://github.com/comfyanonymous/ComfyUI.git "${tmp}"
+  rm -rf "$tmp"
+  git clone https://github.com/comfyanonymous/ComfyUI.git "$tmp"
 
-  # preserve your data
-  keep="${PV}/.keep.$$"; mkdir -p "${keep}"
-  mv "${CUI}/models"        "${keep}/models"        2>/dev/null || true
-  mv "${CUI}/custom_nodes"  "${keep}/custom_nodes"  2>/dev/null || true
-  mv "${CUI}/user"          "${keep}/user"          2>/dev/null || true
+  # preserve user data
+  keep="${PV}/.keep.$$"; rm -rf "$keep"; mkdir -p "$keep"
+  [ -d "${CUI}/models" ]       && mv "${CUI}/models"       "${keep}/models"
+  [ -d "${CUI}/custom_nodes" ] && mv "${CUI}/custom_nodes" "${keep}/custom_nodes"
+  [ -d "${CUI}/user" ]         && mv "${CUI}/user"         "${keep}/user"
 
-  rm -rf "${CUI}"
-  mkdir -p "${CUI}"
+  rm -rf "${CUI}"; mkdir -p "${CUI}"
 
-  # copy whole repo (no excludes to avoid breaking comfy/ldm/models)
-  rsync -a "${tmp}/" "${CUI}/" || (cd "${tmp}" && tar cf - .) | (cd "${CUI}" && tar xf -)
+  if command -v rsync >/dev/null 2>&1; then
+    rsync -a "${tmp}/" "${CUI}/"
+  else
+    (cd "${tmp}" && tar -cf - .) | (cd "${CUI}" && tar -xf -)
+  fi
 
-  # restore your data
-  mv "${keep}/models"        "${CUI}/models"        2>/dev/null || true
-  mv "${keep}/custom_nodes"  "${CUI}/custom_nodes"  2>/dev/null || true
-  mv "${keep}/user"          "${CUI}/user"          2>/dev/null || true
+  # restore user data
+  [ -d "${keep}/models" ]       && mv "${keep}/models"       "${CUI}/models"
+  [ -d "${keep}/custom_nodes" ] && mv "${keep}/custom_nodes" "${CUI}/custom_nodes"
+  [ -d "${keep}/user" ]         && mv "${keep}/user"         "${CUI}/user"
   rm -rf "${keep}" "${tmp}"
 else
   echo "[setup] ComfyUI code OK at ${CUI}"
@@ -64,20 +70,39 @@ python -m pip install --upgrade pip
 DEPS_SENTINEL="${PV}/.deps_ok"
 if [ ! -f "$DEPS_SENTINEL" ]; then
   echo "[setup] Installing runtime deps (first run)"
-  # PyTorch 2.8 (CUDA 12.x wheels)
-  pip install --extra-index-url https://download.pytorch.org/whl/cu124 \
-    torch==2.8.0 torchaudio==2.8.0 || true
-  pip install --extra-index-url https://download.pytorch.org/whl/cu124 \
-    'torchvision==0.23.*' || pip install --extra-index-url https://download.pytorch.org/whl/cu124 torchvision || true
 
-  # SageAttention + video stack
-  pip install -q \
-    sageattention einops accelerate safetensors transformers \
+  # PyTorch 2.8 (CUDA 12.x wheels)
+  pip install --extra-index-url https://download.pytorch.org/whl/cu124 torch==2.8.0 torchaudio==2.8.0 || true
+  # torchvision под torch 2.8
+  pip install --extra-index-url https://download.pytorch.org/whl/cu124 "torchvision==0.23.*" \
+    || pip install --extra-index-url https://download.pytorch.org/whl/cu124 torchvision || true
+
+  # SageAttention + видео-стек
+  pip install -q sageattention einops accelerate safetensors transformers \
     opencv-python av decord imageio[ffmpeg] moviepy tqdm requests httpx || true
 
-  # Repo & custom node requirements (if present)
-  [ -f "${CUI}/requirements.txt" ] && pip install -r "${CUI}/requirements.txt" || true
+  # requirements ядра и кастом-нод
+  if [ -f "${CUI}/requirements.txt" ]; then
+    pip install -r "${CUI}/requirements.txt" || true
+  fi
   if [ -d "${CUI}/custom_nodes" ]; then
-    find "${CUI}/custom_nodes" -maxdepth 2 -type f -name requirements.txt -print0 \
-    | while IFS= read -r -d '' req; do
-        echo "[b]()
+    while IFS= read -r -d '' req; do
+      echo "[bootstrap] pip install -r ${req}"
+      pip install -r "${req}" || true
+    done < <(find "${CUI}/custom_nodes" -maxdepth 2 -type f -name requirements.txt -print0)
+  fi
+
+  touch "$DEPS_SENTINEL"
+else
+  echo "[setup] Runtime deps already installed (skipping)"
+fi
+
+# --- Start ComfyUI ---
+cd "${CUI}"
+exec python main.py \
+  --listen 0.0.0.0 --port "${PORT:-8188}" \
+  --user-directory "${CUI}/user" \
+  --input-directory  "${PV}/inputs" \
+  --output-directory "${PV}/outputs" \
+  --temp-directory   "${PV}/temp" \
+  --preview-method auto
