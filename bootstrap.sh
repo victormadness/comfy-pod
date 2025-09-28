@@ -6,13 +6,8 @@ CUI="${PV}/ComfyUI"            # здесь живёт ВСЁ (код, models, c
 VENV="${PV}/venv"
 
 # --- КЭШИ: PV (по умолчанию) или /tmp (эпhemeral) ---
-#   CACHE_MODE=pv | tmp   (можно переопределить переменной окружения в шаблоне)
-CACHE_MODE="${CACHE_MODE:-pv}"
-if [ "$CACHE_MODE" = "tmp" ]; then
-  base="/tmp/.cache"
-else
-  base="${PV}/.cache"
-fi
+CACHE_MODE="${CACHE_MODE:-pv}"   # pv | tmp  (можно задать в Env шаблона)
+if [ "$CACHE_MODE" = "tmp" ]; then base="/tmp/.cache"; else base="${PV}/.cache"; fi
 export PIP_CACHE_DIR="${PIP_CACHE_DIR:-$base/pip}"
 export HF_HOME="${HF_HOME:-$base/huggingface}"
 export TORCH_HOME="${TORCH_HOME:-$base/torch}"
@@ -40,7 +35,7 @@ else
   echo "[setup] ComfyUI code already present at ${CUI}"
 fi
 
-# --- venv на PV (разовая установка зависимостей) ---
+# --- venv на PV ---
 if [ ! -d "${VENV}" ]; then
   echo "[setup] Creating venv at ${VENV}"
   python3 -m venv --system-site-packages "${VENV}"
@@ -49,29 +44,35 @@ fi
 source "${VENV}/bin/activate"
 python -m pip install --upgrade pip
 
-# --- PyTorch 2.8 (CUDA 12.x cu124), Triton подтянется автоматически ---
-if ! python -c "import torch; print(getattr(torch,'__version__',''))" 2>/dev/null | grep -q '^2\.8\.'; then
-  echo "[setup] Installing PyTorch 2.8.x (CUDA 12.x wheels)"
-  pip install --extra-index-url https://download.pytorch.org/whl/cu124 \
-    torch==2.8.0 torchaudio==2.8.0
-  pip install --extra-index-url https://download.pytorch.org/whl/cu124 \
-    'torchvision==0.23.*' || \
-  pip install --extra-index-url https://download.pytorch.org/whl/cu124 torchvision
-fi
+# --- УСТАНОВКА ЗАВИСИМОСТЕЙ: только один раз ---
+DEPS_SENTINEL="${PV}/.deps_ok"
+if [ ! -f "$DEPS_SENTINEL" ]; then
+  echo "[setup] Installing runtime deps (first run)"
 
-# --- Wan/SageAttention и видео-стек ---
-pip install -q \
-  sageattention einops accelerate safetensors transformers \
-  opencv-python av decord imageio[ffmpeg] moviepy tqdm requests httpx
+  # PyTorch 2.8 (CUDA 12.x cu124)
+  pip install --extra-index-url https://download.pytorch.org/whl/cu124 \
+    torch==2.8.0 torchaudio==2.8.0 || true
+  pip install --extra-index-url https://download.pytorch.org/whl/cu124 \
+    'torchvision==0.23.*' || pip install --extra-index-url https://download.pytorch.org/whl/cu124 torchvision || true
 
-# --- зависимости ядра и кастом-нод ---
-[ -f "${CUI}/requirements.txt" ] && pip install -r "${CUI}/requirements.txt" || true
-if [ -d "${CUI}/custom_nodes" ]; then
-  find "${CUI}/custom_nodes" -maxdepth 2 -type f -name requirements.txt -print0 \
-  | while IFS= read -r -d '' req; do
-      echo "[setup] pip install -r ${req}"
-      pip install -r "${req}" || true
-    done
+  # Wan/SageAttention и видео-стек
+  pip install -q \
+    sageattention einops accelerate safetensors transformers \
+    opencv-python av decord imageio[ffmpeg] moviepy tqdm requests httpx || true
+
+  # зависимости ядра и кастом-нод (если есть requirements.txt)
+  [ -f "${CUI}/requirements.txt" ] && pip install -r "${CUI}/requirements.txt" || true
+  if [ -d "${CUI}/custom_nodes" ]; then
+    find "${CUI}/custom_nodes" -maxdepth 2 -type f -name requirements.txt -print0 \
+    | while IFS= read -r -d '' req; do
+        echo "[bootstrap] pip install -r ${req}"
+        pip install -r "${req}" || true
+      done
+  fi
+
+  touch "$DEPS_SENTINEL"
+else
+  echo "[setup] Runtime deps already installed (skipping)"
 fi
 
 # --- старт ComfyUI ---
