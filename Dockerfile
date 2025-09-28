@@ -12,10 +12,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates rsync \
     && rm -rf /var/lib/apt/lists/*
 
-# PyTorch 2.8 (CUDA 12.x; cu124 подходит под 12.8), Triton подтянется зависимостью
+# PyTorch 2.8 (CUDA 12.x)
 RUN python3 -m pip install --upgrade pip wheel setuptools && \
     python3 -m pip install --extra-index-url https://download.pytorch.org/whl/cu124 \
-      torch==2.8.0 torchvision==0.19.0 torchaudio==2.8.0
+      torch==2.8.0 torchaudio==2.8.0 && \
+    python3 -m pip install --extra-index-url https://download.pytorch.org/whl/cu124 \
+      'torchvision==0.23.*'
 
 # SageAttention + стек для WAN/WanVideoWrapper
 RUN python3 -m pip install \
@@ -26,4 +28,5 @@ WORKDIR /runner
 COPY bootstrap.sh /runner/bootstrap.sh
 RUN chmod +x /runner/bootstrap.sh
 ENTRYPOINT ["/runner/bootstrap.sh"]
+
 
